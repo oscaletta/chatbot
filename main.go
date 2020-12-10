@@ -12,26 +12,43 @@ import (
 	"github.com/PaulSonOfLars/gotgbot/ext"
 	"github.com/PaulSonOfLars/gotgbot/handlers"
 	"github.com/joho/godotenv"
+	cg "github.com/superoo7/go-gecko/v3"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
-type Time struct {
-	Abbreviation string      `json:"abbreviation"`
-	ClientIP     string      `json:"client_ip"`
-	Datetime     string      `json:"datetime"`
-	DayOfWeek    int64       `json:"day_of_week"`
-	DayOfYear    int64       `json:"day_of_year"`
-	Dst          bool        `json:"dst"`
-	DstFrom      interface{} `json:"dst_from"`
-	DstOffset    int64       `json:"dst_offset"`
-	DstUntil     interface{} `json:"dst_until"`
-	RawOffset    int64       `json:"raw_offset"`
-	Timezone     string      `json:"timezone"`
-	Unixtime     int64       `json:"unixtime"`
-	UTCDatetime  string      `json:"utc_datetime"`
-	UTCOffset    string      `json:"utc_offset"`
-	WeekNumber   int64       `json:"week_number"`
+var tokenList = make(map[string]string)
+
+type Token struct {
+	Name    string   `json:"name"`
+	Tickers []Ticker `json:"tickers"`
+}
+
+type Ticker struct {
+	Base                   string             `json:"base"`
+	Target                 string             `json:"target"`
+	Market                 Market             `json:"market"`
+	Last                   float64            `json:"last"`
+	Volume                 float64            `json:"volume"`
+	ConvertedLast          map[string]float64 `json:"converted_last"`
+	ConvertedVolume        map[string]float64 `json:"converted_volume"`
+	TrustScore             string             `json:"trust_score"`
+	BidAskSpreadPercentage float64            `json:"bid_ask_spread_percentage"`
+	Timestamp              string             `json:"timestamp"`
+	LastTradedAt           string             `json:"last_traded_at"`
+	LastFetchAt            string             `json:"last_fetch_at"`
+	IsAnomaly              bool               `json:"is_anomaly"`
+	IsStale                bool               `json:"is_stale"`
+	TradeURL               string             `json:"trade_url"`
+	TokenInfoURL           string             `json:"token_info_url"`
+	CoinID                 string             `json:"coin_id"`
+	TargetCoinID           string             `json:"target_coin_id"`
+}
+
+type Market struct {
+	Name                string `json:"name"`
+	Identifier          string `json:"identifier"`
+	HasTradingIncentive bool   `json:"has_trading_incentive"`
 }
 
 func init() {
@@ -55,53 +72,48 @@ func main() {
 		return
 	}
 
+	loadTokenList()
+	logger.Sugar().Info("Tokens list loaded")
+
 	logger.Sugar().Info("Updater started successfully")
 	updater.StartCleanPolling()
-	updater.Dispatcher.AddHandler(handlers.NewCommand("start", start))
-	updater.Dispatcher.AddHandler(handlers.NewCommand("rome", rome))
-	updater.Dispatcher.AddHandler(handlers.NewCommand("dumb", hthau))
-
-	//updater.Dispatcher.AddHandler(handlers.NewMessage(Filters.Text, echo))
+	//updater.Dispatcher.AddHandler(handlers.NewCommand("romestime", romesTime))
+	//updater.Dispatcher.AddHandler(handlers.NewCommand("price", usdPrice))
 
 	// reply to messages satisfying this regex
-	updater.Dispatcher.AddHandler(handlers.NewRegex("(?i)llamas", replyMessage))
+	updater.Dispatcher.AddHandler(handlers.NewRegex("(?i)/", returnTokenPrice))
+	updater.Dispatcher.AddHandler(handlers.NewRegex("(?i)arb", executArbitrage))
 	updater.Idle()
-
 }
 
-func price(b ext.Bot, u *gotgbot.Update) error {
-	b.SendMessage(u.Message.Chat.Id, "The current price is 10")
-	return nil
+func loadTokenList() {
+	tokenList["xor"] = "sora"
+	tokenList["val"] = "sora-validator-token"
+	tokenList["link"] = "chainlink"
+	tokenList["ramp"] = "ramp"
+	tokenList["shitcoin"] = "shitcoin"
 }
 
-func echo(b ext.Bot, u *gotgbot.Update) error {
-	b.SendMessage(u.EffectiveChat.Id, u.EffectiveMessage.Text)
-	return nil
+func getTokenId(tokenTicker string) string {
+	if _, ok := tokenList[tokenTicker]; ok {
+		return tokenList[tokenTicker]
+	}
+	return tokenList["shitcoin"]
 }
 
-func start(b ext.Bot, u *gotgbot.Update) error {
-	b.SendMessage(u.Message.Chat.Id, "Congrats! You just issued a /start on your go bot!")
-	return nil
+func getTokenPrice(tokenName string) string {
+	cg := cg.NewClient(nil)
+	price, err := cg.SimpleSinglePrice(tokenList[tokenName[1:]], "usd")
+	if err != nil {
+		log.Fatal(err)
+	}
+	return fmt.Sprintf("%s is worth %f %s", tokenName[1:], price.MarketPrice, price.Currency)
 }
 
-func rome(b ext.Bot, u *gotgbot.Update) error {
-	b.SendMessage(u.Message.Chat.Id, getTime())
-	return nil
-}
+func getTokenArbitrage(tokenName string) string {
 
-func hthau(b ext.Bot, u *gotgbot.Update) error {
-	b.SendMessage(u.Message.Chat.Id, "Who the hell are you?")
-	return nil
-}
-
-func replyMessage(b ext.Bot, u *gotgbot.Update) error {
-	b.SendMessage(u.Message.Chat.Id, "Me llamo Lucia Romano")
-	return gotgbot.ContinueGroups{} // will keep executing handlers, even after having been caught by this one.
-}
-
-func getTime() string {
-	fmt.Println("1. Performing Http Get...")
-	resp, err := http.Get("http://worldtimeapi.org/api/timezone/Europe/Rome")
+	endpointURL := "https://api.coingecko.com/api/v3/coins/" + tokenList[tokenName[3:]] + "/tickers"
+	resp, err := http.Get(endpointURL)
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -109,9 +121,42 @@ func getTime() string {
 	defer resp.Body.Close()
 	bodyBytes, _ := ioutil.ReadAll(resp.Body)
 
-	// Convert response body to Todo struct
-	var timeStruct Time
-	json.Unmarshal(bodyBytes, &timeStruct)
-	fmt.Printf("API Response as struct %+v\n", timeStruct)
-	return timeStruct.Datetime
+	var token Token
+	json.Unmarshal(bodyBytes, &token)
+	//fmt.Printf("API Response as struct %+v\n", token)
+
+	return buildArbitrageMessage(token)
+}
+
+func buildArbitrageMessage(token Token) string {
+	var message string = "\n"
+	counter := 1
+	for _, ticker := range token.Tickers {
+		//for _, market := range ticker
+		message += " " + ticker.Market.Name + "\n"
+		for _, value := range ticker.ConvertedLast {
+			if counter == 1 {
+				message += "" + fmt.Sprintf("BTC: %f", value) + "\n"
+			}
+			if counter == 2 {
+				message += "" + fmt.Sprintf("ETH: %f", value) + "\n"
+			}
+			if counter == 3 {
+				message += "" + fmt.Sprintf("USD: %f", value) + "\n"
+			}
+			counter++
+		}
+		counter = 1
+	}
+	return message
+}
+
+func returnTokenPrice(b ext.Bot, u *gotgbot.Update) error {
+	b.SendMessage(u.Message.Chat.Id, getTokenPrice(u.EffectiveMessage.Text))
+	return nil
+}
+
+func executArbitrage(b ext.Bot, u *gotgbot.Update) error {
+	b.SendMessage(u.Message.Chat.Id, getTokenArbitrage(u.EffectiveMessage.Text))
+	return gotgbot.ContinueGroups{} // will keep executing handlers, even after having been caught by this one.
 }
